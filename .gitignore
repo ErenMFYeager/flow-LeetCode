@@ -2,3 +2,4 @@ lib/
 problems_cache.json
 __pycache__/
 *.pyc
+error.log
