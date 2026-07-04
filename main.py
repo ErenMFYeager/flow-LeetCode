@@ -66,18 +66,33 @@ class LeetCodeSearch(FlowLauncher):
             matches = self.fuzzy_search(param, problems)
 
         return self.build_results(matches)
+    
+    NUMBER_WORDS = {
+        "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+        "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+        "ten": "10"
+    }
+
+    def normalize_numbers(self, text):
+        words = text.split()
+        converted = [NUMBER_WORDS.get(w, w) for w in words]
+        return " ".join(converted)
 
     def fuzzy_search(self, param, problems, limit=20, threshold=55):
         exact_matches = [p for p in problems if param in p["title"].lower()]
         if exact_matches:
             return exact_matches[:limit]
         
+        normalized_param = self.normalize_numbers(param)
+        if normalized_param != param:
+            normalized_matches = [p for p in problems if normalized_param in p["title"].lower()]
+            if normalized_matches:
+                return normalized_matches[:limit]
+        
         titles = [p["title"] for p in problems]
-
         scored = process.extract(
             param, titles, scorer=fuzz.ratio, limit=limit * 3
         )
-
         scored.sort(key=lambda x: x[1], reverse=True)
         matched = [
             problems[idx] for (title, score, idx) in scored if score >= threshold
