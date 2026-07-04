@@ -3,7 +3,7 @@
 Search and open LeetCode problems instantly from Flow Launcher.
 
 ## Usage
-`lc two sum` → opens the problem page
+`lc two sum` → opens the problem page <br>
 `lc #1 or lc 1` -> opens up the problem with same LeetCode number
 
 ## Status
