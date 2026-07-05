@@ -1,18 +1,19 @@
-import sys
+import json
 import os
+import random
+import sys
 import threading
+import time
 import traceback
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "lib"))
 
+import requests
 from flowlauncher import FlowLauncher
 from rapidfuzz import fuzz, process
-import requests
-import json
-import time
 
 CACHE_FILE = os.path.join(os.path.dirname(__file__), "problems_cache.json")
-CACHE_TTL = 86400
+CACHE_TTL = 604800
 
 QUERY = """
 query problemsetQuestionList($skip: Int, $limit: Int) {
@@ -78,6 +79,9 @@ class LeetCodeSearch(FlowLauncher):
                     "SubTitle": "This takes ~20-30 seconds. Feel free to try searching again shortly!",
                     "IcoPath": "SearchLeetCode.png"
                 }]
+            
+            if param == "random":
+                return self.handle_random(problems)
 
             if not param:
                 return [{
@@ -270,6 +274,24 @@ class LeetCodeSearch(FlowLauncher):
                 "SubTitle": "Check your connection and try again",
                 "IcoPath": "SearchLeetCode.png"
             }]
+
+    def handle_random(self, problems):
+        free_problems = [p for p in problems if not p["isPaidOnly"]]
+        pool = free_problems if free_problems else problems
+        p = random.choice(pool)
+
+        lock = " 🔒" if p["isPaidOnly"] else ""
+        ac_rate = f"{p['acRate']:.1f}%" if p.get("acRate") is not None else "N/A"
+
+        return [{
+            "Title": f"🎲 {p['questionFrontendId']}. {p['title']} ({p['difficulty']}){lock}",
+            "SubTitle": f"Acceptance: {ac_rate} — Press Enter to open, search 'lc random' again for another",
+            "IcoPath": "SearchLeetCode.png",
+            "JsonRPCAction": {
+                "method": "open_url",
+                "parameters": [f"https://leetcode.com/problems/{p['titleSlug']}/"]
+            }
+        }]
 
 if __name__ == "__main__":
     LeetCodeSearch()
