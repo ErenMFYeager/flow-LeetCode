@@ -33,6 +33,23 @@ query problemsetQuestionList($skip: Int, $limit: Int) {
   }
 }
 """
+DAILY_QUERY = """
+query questionOfToday {
+  activeDailyCodingChallengeQuestion {
+    date
+    link
+    question {
+      questionFrontendId
+      title
+      titleSlug
+      difficulty
+      acRate
+      isPaidOnly
+    }
+  }
+}
+"""
+
 
 NUMBER_WORDS = {
     "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
@@ -46,6 +63,9 @@ class LeetCodeSearch(FlowLauncher):
     def query(self, param):
         try:
             param = param.lower().strip()
+            if param == "daily":
+                return self.handle_daily()
+            
             problems = self.load_cache_only()
 
             if problems is None:
@@ -210,6 +230,46 @@ class LeetCodeSearch(FlowLauncher):
             time.sleep(0.3)
 
         return all_problems
+    
+    def fetch_daily(self):
+        resp = requests.post(
+            "https://leetcode.com/graphql",
+            json={"query": DAILY_QUERY},
+            headers={
+                "Content-Type": "application/json",
+                "Referer": "https://leetcode.com",
+                "User-Agent": "Mozilla/5.0"
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        return payload["data"]["activeDailyCodingChallengeQuestion"]
+    
+    def handle_daily(self):
+        try:
+            daily = self.fetch_daily()
+            q = daily["question"]
+            lock = " 🔒" if q["isPaidOnly"] else ""
+            ac_rate = f"{q['acRate']:.1f}%" if q.get("acRate") is not None else "N/A"
+
+            return [{
+                "Title": f"🔥 Today's Daily: {q['questionFrontendId']}. {q['title']} ({q['difficulty']}){lock}",
+                "SubTitle": f"Acceptance: {ac_rate} — Press Enter to open",
+                "IcoPath": "SearchLeetCode.png",
+                "JsonRPCAction": {
+                    "method": "open_url",
+                    "parameters": [f"https://leetcode.com{daily['link']}"]
+                }
+            }]
+        except Exception as e:
+            with open(os.path.join(os.path.dirname(__file__), "error.log"), "a") as f:
+                f.write(f"Daily fetch error: {e}\n")
+            return [{
+                "Title": "Couldn't fetch today's daily challenge",
+                "SubTitle": "Check your connection and try again",
+                "IcoPath": "SearchLeetCode.png"
+            }]
 
 if __name__ == "__main__":
     LeetCodeSearch()
