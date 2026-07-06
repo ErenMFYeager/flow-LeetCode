@@ -1,0 +1,27 @@
+name: Publish Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read plugin.json version
+        id: version
+        run: echo "version=$(jq -r '.Version' plugin.json)" >> $GITHUB_OUTPUT
+
+      - name: Zip plugin
+        run: |
+          mkdir release
+          zip -r release/LeetCodeSearch.zip . -x ".git/*" ".github/*" "release/*" "lib/*" "problems_cache.json" "fetch_progress.json" "error.log"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/LeetCodeSearch.zip
+          tag_name: v${{ steps.version.outputs.version }}
