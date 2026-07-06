@@ -2,7 +2,6 @@ import json
 import os
 import random
 import sys
-import threading
 import time
 import traceback
 
@@ -13,7 +12,9 @@ from flowlauncher import FlowLauncher
 from rapidfuzz import fuzz, process
 
 CACHE_FILE = os.path.join(os.path.dirname(__file__), "problems_cache.json")
-CACHE_TTL = 604800
+PROGRESS_FILE = os.path.join(os.path.dirname(__file__), "fetch_progress.json")
+LOG_FILE = os.path.join(os.path.dirname(__file__), "error.log")
+CACHE_TTL = 604800  # 7 days
 
 QUERY = """
 query problemsetQuestionList($skip: Int, $limit: Int) {
@@ -30,10 +31,15 @@ query problemsetQuestionList($skip: Int, $limit: Int) {
       difficulty
       acRate
       isPaidOnly
+      topicTags {
+        name
+        slug
+      }
     }
   }
 }
 """
+
 DAILY_QUERY = """
 query questionOfToday {
   activeDailyCodingChallengeQuestion {
@@ -51,46 +57,78 @@ query questionOfToday {
 }
 """
 
-
 NUMBER_WORDS = {
     "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
     "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
     "ten": "10"
 }
 
+TOPIC_ALIASES = {
+    "dp": "dynamic-programming",
+    "graph": "graph",
+    "greedy": "greedy",
+    "tree": "tree",
+    "array": "array",
+    "string": "string",
+    "hashmap": "hash-table",
+    "hash": "hash-table",
+    "stack": "stack",
+    "queue": "queue",
+    "heap": "heap-priority-queue",
+    "binary search": "binary-search",
+    "binary": "binary-search",
+    "bfs": "breadth-first-search",
+    "dfs": "depth-first-search",
+    "linked list": "linked-list",
+    "backtracking": "backtracking",
+    "recursion": "backtracking",
+    "sliding window": "sliding-window",
+    "two pointers": "two-pointers",
+    "bit": "bit-manipulation",
+    "math": "math",
+    "sort": "sorting",
+    "trie": "trie",
+}
+
+
+def log(msg):
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%X')} - {msg}\n")
+    except Exception:
+        pass
+
+
 class LeetCodeSearch(FlowLauncher):
-    _fetching = False
 
     def query(self, param):
         try:
             param = param.lower().strip()
+
             if param == "daily":
                 return self.handle_daily()
-            
+
             problems = self.load_cache_only()
 
             if problems is None:
-                if not LeetCodeSearch._fetching:
-                    LeetCodeSearch._fetching = True
-                    threading.Thread(target=self.background_fetch, daemon=True).start()
-                
-                return [{
-                    "Title": "Indexing LeetCode problems for the first time...",
-                    "SubTitle": "This takes ~20-30 seconds. Feel free to try searching again shortly!",
-                    "IcoPath": "SearchLeetCode.png"
-                }]
-            
+                return self.continue_indexing()
+
             if param == "random":
                 return self.handle_random(problems)
 
             if not param:
                 return [{
                     "Title": "Type a problem name or number...",
-                    "SubTitle": "e.g. lc two sum  or  lc 1",
+                    "SubTitle": "e.g. lc two sum | lc 1 | lc daily | lc random | lc topic:dp",
                     "IcoPath": "SearchLeetCode.png"
                 }]
 
             clean_param = param.lstrip("#")
+
+            if clean_param.startswith("topic:") or clean_param.startswith("tag:"):
+                topic_query = clean_param.split(":", 1)[1].strip()
+                matches = self.filter_by_topic(topic_query, problems)
+                return self.build_results(matches)
 
             if clean_param.isdigit():
                 matches = [p for p in problems if p["questionFrontendId"] == clean_param]
@@ -98,17 +136,100 @@ class LeetCodeSearch(FlowLauncher):
                 matches = self.fuzzy_search(param, problems)
 
             return self.build_results(matches)
-        
-        except Exception as e:
-            # If ANYTHING crashes during the search, show it directly in Flow Launcher!
-            error_msg = str(e)
-            with open(os.path.join(os.path.dirname(__file__), "error.log"), "a") as f:
-                f.write(traceback.format_exc() + "\n")
+
+        except Exception:
+            log("QUERY CRASHED:\n" + traceback.format_exc())
             return [{
-                "Title": "Plugin Crashed!",
-                "SubTitle": f"Error: {error_msg}",
+                "Title": "Plugin crashed — check error.log",
+                "SubTitle": str(sys.exc_info()[1]),
                 "IcoPath": "SearchLeetCode.png"
             }]
+
+    # ---------- Indexing (synchronous, chunked across calls) ----------
+
+    def continue_indexing(self):
+        skip = 0
+        partial = []
+
+        if os.path.exists(PROGRESS_FILE):
+            try:
+                with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
+                    state = json.load(f)
+                    skip = state.get("skip", 0)
+                    partial = state.get("problems", [])
+            except Exception:
+                skip = 0
+                partial = []
+
+        batch_size = 100
+        pages_this_call = 15
+        data = []
+
+        for _ in range(pages_this_call):
+            try:
+                resp = requests.post(
+                    "https://leetcode.com/graphql",
+                    json={"query": QUERY, "variables": {"skip": skip, "limit": batch_size}},
+                    headers={
+                        "Content-Type": "application/json",
+                        "Referer": "https://leetcode.com",
+                        "User-Agent": "Mozilla/5.0"
+                    },
+                    timeout=8,
+                )
+                resp.raise_for_status()
+                payload = resp.json()
+                if "errors" in payload:
+                    raise Exception(f"GraphQL error: {payload['errors']}")
+                data = payload["data"]["problemsetQuestionList"]["questions"]
+            except Exception as e:
+                log(f"Indexing error at skip={skip}: {e}")
+                data = []
+                break
+
+            if not data:
+                break
+
+            partial.extend(data)
+            skip += batch_size
+
+            if len(data) < batch_size:
+                break
+
+        done = (not data) or (len(data) < batch_size)
+
+        if done:
+            with open(CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(partial, f)
+            if os.path.exists(PROGRESS_FILE):
+                os.remove(PROGRESS_FILE)
+            log(f"Indexing complete, {len(partial)} problems")
+            return [{
+                "Title": f"Indexing complete! Loaded {len(partial)} problems.",
+                "SubTitle": "Search again now, e.g. lc two sum",
+                "IcoPath": "SearchLeetCode.png"
+            }]
+        else:
+            with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
+                json.dump({"skip": skip, "problems": partial}, f)
+            return [{
+                "Title": f"Indexing... {len(partial)} problems loaded so far",
+                "SubTitle": "Keep typing/search again to continue (takes a few tries)",
+                "IcoPath": "SearchLeetCode.png"
+            }]
+
+    def load_cache_only(self):
+        if os.path.exists(CACHE_FILE):
+            age = time.time() - os.path.getmtime(CACHE_FILE)
+            if age < CACHE_TTL:
+                try:
+                    with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                        return json.load(f)
+                except Exception:
+                    return None
+        return None
+
+    # ---------- Search ----------
 
     def normalize_numbers(self, text):
         words = text.split()
@@ -128,25 +249,26 @@ class LeetCodeSearch(FlowLauncher):
                 normalized_matches = [p for p in problems if candidate in p["title"].lower()]
                 if normalized_matches:
                     return normalized_matches[:limit]
-        
+
         titles = [p["title"] for p in problems]
-
-        scored = process.extract(
-            param, titles, scorer=fuzz.ratio, limit=limit * 3
-        )
-
+        scored = process.extract(param, titles, scorer=fuzz.ratio, limit=limit * 3)
         scored.sort(key=lambda x: x[1], reverse=True)
-        matched = [
-            problems[idx] for (title, score, idx) in scored if score >= threshold
-        ][:limit]
-
+        matched = [problems[idx] for (title, score, idx) in scored if score >= threshold][:limit]
         return matched
+
+    def filter_by_topic(self, topic_query, problems):
+        slug = TOPIC_ALIASES.get(topic_query, topic_query.replace(" ", "-"))
+        matches = [
+            p for p in problems
+            if any(tag["slug"] == slug for tag in p.get("topicTags", []))
+        ]
+        random.shuffle(matches)
+        return matches[:20]
 
     def build_results(self, matches):
         results = []
         for p in matches[:20]:
-            lock = " 🔒" if p["isPaidOnly"] else ""
-            
+            lock = " \U0001F512" if p["isPaidOnly"] else ""
             ac_rate_val = p.get('acRate')
             ac_rate_str = f"{ac_rate_val:.1f}%" if ac_rate_val is not None else "N/A"
 
@@ -170,71 +292,8 @@ class LeetCodeSearch(FlowLauncher):
     def open_url(self, url):
         os.startfile(url)
 
-    def load_cache_only(self):
-        if os.path.exists(CACHE_FILE):
-            age = time.time() - os.path.getmtime(CACHE_FILE)
-            if age < CACHE_TTL:
-                try:
-                    with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                        return json.load(f)
-                except Exception:
-                    return None
-        return None
+    # ---------- Daily ----------
 
-    def background_fetch(self):
-        try:
-            problems = self.fetch_problems()
-            if problems:
-                with open(CACHE_FILE, "w", encoding="utf-8") as f:
-                    json.dump(problems, f)
-        finally:
-            LeetCodeSearch._fetching = False
-
-    def fetch_problems(self):
-        all_problems = []
-        skip = 0
-        batch_size = 100
-
-        while True:
-            try:
-                resp = requests.post(
-                    "https://leetcode.com/graphql",
-                    json={
-                        "query": QUERY,
-                        "variables": {"skip": skip, "limit": batch_size}
-                    },
-                    headers={
-                        "Content-Type": "application/json",
-                        "Referer": "https://leetcode.com",
-                        "User-Agent": "Mozilla/5.0"
-                    },
-                    timeout=10,
-                )
-                resp.raise_for_status()
-                payload = resp.json()
-
-                if "errors" in payload:
-                    raise Exception(f"GraphQL error: {payload['errors']}")
-
-                data = payload["data"]["problemsetQuestionList"]["questions"]
-            except Exception as e:
-                with open(os.path.join(os.path.dirname(__file__), "error.log"), "a") as f:
-                    f.write(f"Network error at skip={skip}: {e}\n")
-                break
-
-            if not data:
-                break
-
-            all_problems.extend(data)
-            skip += batch_size
-
-            if len(data) < batch_size:
-                break
-
-            time.sleep(0.3)
-
-        return all_problems
-    
     def fetch_daily(self):
         resp = requests.post(
             "https://leetcode.com/graphql",
@@ -249,16 +308,16 @@ class LeetCodeSearch(FlowLauncher):
         resp.raise_for_status()
         payload = resp.json()
         return payload["data"]["activeDailyCodingChallengeQuestion"]
-    
+
     def handle_daily(self):
         try:
             daily = self.fetch_daily()
             q = daily["question"]
-            lock = " 🔒" if q["isPaidOnly"] else ""
+            lock = " \U0001F512" if q["isPaidOnly"] else ""
             ac_rate = f"{q['acRate']:.1f}%" if q.get("acRate") is not None else "N/A"
 
             return [{
-                "Title": f"🔥 Today's Daily: {q['questionFrontendId']}. {q['title']} ({q['difficulty']}){lock}",
+                "Title": f"\U0001F525 Today's Daily: {q['questionFrontendId']}. {q['title']} ({q['difficulty']}){lock}",
                 "SubTitle": f"Acceptance: {ac_rate} — Press Enter to open",
                 "IcoPath": "SearchLeetCode.png",
                 "JsonRPCAction": {
@@ -267,24 +326,25 @@ class LeetCodeSearch(FlowLauncher):
                 }
             }]
         except Exception as e:
-            with open(os.path.join(os.path.dirname(__file__), "error.log"), "a") as f:
-                f.write(f"Daily fetch error: {e}\n")
+            log(f"Daily fetch error: {e}")
             return [{
                 "Title": "Couldn't fetch today's daily challenge",
                 "SubTitle": "Check your connection and try again",
                 "IcoPath": "SearchLeetCode.png"
             }]
 
+    # ---------- Random ----------
+
     def handle_random(self, problems):
         free_problems = [p for p in problems if not p["isPaidOnly"]]
         pool = free_problems if free_problems else problems
         p = random.choice(pool)
 
-        lock = " 🔒" if p["isPaidOnly"] else ""
+        lock = " \U0001F512" if p["isPaidOnly"] else ""
         ac_rate = f"{p['acRate']:.1f}%" if p.get("acRate") is not None else "N/A"
 
         return [{
-            "Title": f"🎲 {p['questionFrontendId']}. {p['title']} ({p['difficulty']}){lock}",
+            "Title": f"\U0001F3B2 {p['questionFrontendId']}. {p['title']} ({p['difficulty']}){lock}",
             "SubTitle": f"Acceptance: {ac_rate} — Press Enter to open, search 'lc random' again for another",
             "IcoPath": "SearchLeetCode.png",
             "JsonRPCAction": {
@@ -292,6 +352,7 @@ class LeetCodeSearch(FlowLauncher):
                 "parameters": [f"https://leetcode.com/problems/{p['titleSlug']}/"]
             }
         }]
+
 
 if __name__ == "__main__":
     LeetCodeSearch()
