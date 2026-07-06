@@ -57,6 +57,8 @@ query questionOfToday {
 }
 """
 
+DIFFICULTIES = {"easy", "medium", "hard"}
+
 NUMBER_WORDS = {
     "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
     "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
@@ -124,16 +126,25 @@ class LeetCodeSearch(FlowLauncher):
                 }]
 
             clean_param = param.lstrip("#")
+            tokens = clean_param.split()
+            tokens, filters = self.extract_filters(tokens)
+            clean_param = " ".join(tokens).strip()
 
             if clean_param.startswith("topic:") or clean_param.startswith("tag:"):
                 topic_query = clean_param.split(":", 1)[1].strip()
                 matches = self.filter_by_topic(topic_query, problems)
+                matches = self.apply_filters(matches, filters)
                 return self.build_results(matches)
 
             if clean_param.isdigit():
                 matches = [p for p in problems if p["questionFrontendId"] == clean_param]
+            elif not clean_param:
+                # e.g. "lc medium" alone with no title/topic — just filter the whole set
+                matches = self.apply_filters(problems, filters)
+                random.shuffle(matches)
             else:
-                matches = self.fuzzy_search(param, problems)
+                matches = self.fuzzy_search(clean_param, problems)
+                matches = self.apply_filters(matches, filters)
 
             return self.build_results(matches)
 
@@ -353,6 +364,30 @@ class LeetCodeSearch(FlowLauncher):
             }
         }]
 
+    def extract_filters(self, tokens):
+        """Pulls out difficulty/paid/free keywords, returns (remaining_tokens, filters_dict)"""
+        filters = {"difficulty": None, "paid": None}
+        remaining = []
+        for t in tokens:
+            if t in DIFFICULTIES:
+                filters["difficulty"] = t
+            elif t == "paid":
+                filters["paid"] = True
+            elif t == "free":
+                filters["paid"] = False
+            else:
+                remaining.append(t)
+        return remaining, filters
+
+    def apply_filters(self, problems, filters):
+        result = problems
+        if filters["difficulty"]:
+            result = [p for p in result if p["difficulty"].lower() == filters["difficulty"]]
+        if filters["paid"] is True:
+            result = [p for p in result if p["isPaidOnly"]]
+        elif filters["paid"] is False:
+            result = [p for p in result if not p["isPaidOnly"]]
+        return result
 
 if __name__ == "__main__":
     LeetCodeSearch()
