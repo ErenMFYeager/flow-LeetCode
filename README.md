@@ -2,7 +2,7 @@
 
 Search, filter, and open LeetCode problems instantly — right from [Flow Launcher](https://www.flowlauncher.com/), without touching your browser first.
 
-![LeetCode Search](SearchLeetCode.png)
+<img src="SearchLeetCode.png" alt="LeetCode Search" width="400" />
 
 ## Features
 
@@ -36,7 +36,7 @@ Search, filter, and open LeetCode problems instantly — right from [Flow Launch
 
 ## First-time setup
 
-On first use, the plugin indexes LeetCode's full problem list (~3,000+ problems) for fast local search. This happens automatically in the background across your first few searches — you'll see an "Indexing... X problems loaded so far" message until it completes (usually 1–3 searches). After that, results are instant, and the cache refreshes automatically every 7 days.
+On first use, the plugin indexes LeetCode's full problem list (~3,000+ problems) for fast local search. This runs in a background process that keeps working even if you stop typing — search once to kick it off, then just wait a bit and search again to check progress; you don't need to keep retyping to move it forward. After that, results are instant, and the cache refreshes automatically every 7 days (or run `lc refresh` to force it sooner).
 
 ## Installation
 

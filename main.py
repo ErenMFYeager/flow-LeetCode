@@ -1,6 +1,7 @@
 import json
 import os
 import random
+import subprocess
 import sys
 import time
 import traceback
@@ -13,8 +14,11 @@ from rapidfuzz import fuzz, process
 
 CACHE_FILE = os.path.join(os.path.dirname(__file__), "problems_cache.json")
 PROGRESS_FILE = os.path.join(os.path.dirname(__file__), "fetch_progress.json")
+LOCK_FILE = os.path.join(os.path.dirname(__file__), "indexing.lock")
 LOG_FILE = os.path.join(os.path.dirname(__file__), "error.log")
-CACHE_TTL = 604800  
+CACHE_TTL = 604800  # 7 days
+
+HEARTBEAT_STALE_SECONDS = 15
 
 QUERY = """
 query problemsetQuestionList($skip: Int, $limit: Int) {
@@ -168,95 +172,79 @@ class LeetCodeSearch(FlowLauncher):
                 "IcoPath": "SearchLeetCode.png"
             }]
 
-    # ---------- Indexing (synchronous, chunked across calls) ----------
+    # ---------- Indexing ----------
+    #
+    # A fresh Python process runs per query, so an in-process thread dies the
+    # instant query() returns. Instead: spawn a genuinely detached OS
+    # subprocess (this same script, run with --index-worker) that keeps
+    # fetching independently of Flow Launcher's process lifecycle, writing
+    # progress to PROGRESS_FILE as it goes. Each query() call just checks
+    # that file — it never blocks on the network itself.
 
     def continue_indexing(self):
-        skip = 0
-        partial = []
+        if not self._worker_alive():
+            self._spawn_worker()
 
-        if os.path.exists(PROGRESS_FILE):
-            try:
-                with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
-                    state = json.load(f)
-                    skip = state.get("skip", 0)
-                    partial = state.get("problems", [])
-            except Exception:
-                skip = 0
-                partial = []
+        count = self._progress_count()
 
-        batch_size = 100
-        pages_this_call = 15
-        data = []
+        return [{
+            "Title": f"Indexing... {count} problems loaded so far",
+            "SubTitle": "Running in the background — check back in a bit, no need to keep typing",
+            "IcoPath": "SearchLeetCode.png"
+        }]
 
-        for _ in range(pages_this_call):
-            try:
-                resp = requests.post(
-                    "https://leetcode.com/graphql",
-                    json={"query": QUERY, "variables": {"skip": skip, "limit": batch_size}},
-                    headers={
-                        "Content-Type": "application/json",
-                        "Referer": "https://leetcode.com",
-                        "User-Agent": "Mozilla/5.0"
-                    },
-                    timeout=8,
-                )
-                resp.raise_for_status()
-                payload = resp.json()
-                if "errors" in payload:
-                    raise Exception(f"GraphQL error: {payload['errors']}")
-                data = payload["data"]["problemsetQuestionList"]["questions"]
-            except Exception as e:
-                log(f"Indexing error at skip={skip}: {e}")
-                data = []
-                break
+    def _worker_alive(self):
+        if not os.path.exists(LOCK_FILE):
+            return False
+        try:
+            age = time.time() - os.path.getmtime(LOCK_FILE)
+        except Exception:
+            return False
+        return age < HEARTBEAT_STALE_SECONDS
 
-            if not data:
-                break
+    def _progress_count(self):
+        if not os.path.exists(PROGRESS_FILE):
+            return 0
+        try:
+            with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
+                return len(json.load(f).get("problems", []))
+        except Exception:
+            return 0
 
-            partial.extend(data)
-            skip += batch_size
+    def _spawn_worker(self):
+        try:
+            with open(LOCK_FILE, "w", encoding="utf-8") as f:
+                f.write(str(time.time()))
+        except Exception as e:
+            log(f"Couldn't write lock file: {e}")
+            return
 
-            if len(data) < batch_size:
-                break
-
-        done = (not data) or (len(data) < batch_size)
-
-        if done and not partial:
-            # Nothing loaded at all (e.g. offline / LeetCode unreachable on the very
-            # first request) — don't write an empty cache, or we'd be stuck with
-            # zero problems for a full week until CACHE_TTL expires.
-            if os.path.exists(PROGRESS_FILE):
-                os.remove(PROGRESS_FILE)
-            log("Indexing failed with no problems loaded, will retry on next search")
-            return [{
-                "Title": "Couldn't reach LeetCode to build the index",
-                "SubTitle": "Check your connection and search again to retry",
-                "IcoPath": "SearchLeetCode.png"
-            }]
-
-        if done:
-            with open(CACHE_FILE, "w", encoding="utf-8") as f:
-                json.dump(partial, f)
-            if os.path.exists(PROGRESS_FILE):
-                os.remove(PROGRESS_FILE)
-            log(f"Indexing complete, {len(partial)} problems")
-            return [{
-                "Title": f"Indexing complete! Loaded {len(partial)} problems.",
-                "SubTitle": "Search again now, e.g. lc two sum",
-                "IcoPath": "SearchLeetCode.png"
-            }]
+        script_path = os.path.abspath(__file__)
+        kwargs = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "cwd": os.path.dirname(script_path),
+            "close_fds": True,
+        }
+        if os.name == "nt":
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+            CREATE_NO_WINDOW = 0x08000000
+            kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
         else:
-            with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
-                json.dump({"skip": skip, "problems": partial}, f)
-            return [{
-                "Title": f"Indexing... {len(partial)} problems loaded so far",
-                "SubTitle": "Keep typing/search again to continue (takes a few tries)",
-                "IcoPath": "SearchLeetCode.png"
-            }]
+            kwargs["start_new_session"] = True
+
+        try:
+            subprocess.Popen([sys.executable, script_path, "--index-worker"], **kwargs)
+            log("Spawned detached indexing worker")
+        except Exception as e:
+            log(f"Failed to spawn indexing worker: {e}")
+
 
     def force_refresh(self):
         """lc refresh — wipes the cache and kicks off re-indexing immediately."""
-        for f in (CACHE_FILE, PROGRESS_FILE):
+        for f in (CACHE_FILE, PROGRESS_FILE, LOCK_FILE):
             if os.path.exists(f):
                 try:
                     os.remove(f)
@@ -449,5 +437,85 @@ class LeetCodeSearch(FlowLauncher):
             result = [p for p in result if not p["isPaidOnly"]]
         return result
 
+
+def run_index_worker():
+    """Entry point for the detached background process (invoked as
+    `python main.py --index-worker`). Fetches the whole problem list,
+    resuming from PROGRESS_FILE if a previous run left one, and writes a
+    heartbeat to LOCK_FILE after every batch so query() calls know it's
+    still alive and don't spawn a duplicate worker."""
+    skip = 0
+    problems = []
+    batch_size = 100
+
+    if os.path.exists(PROGRESS_FILE):
+        try:
+            with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
+                state = json.load(f)
+                skip = state.get("skip", 0)
+                problems = state.get("problems", [])
+        except Exception:
+            skip = 0
+            problems = []
+
+    while True:
+        try:
+            resp = requests.post(
+                "https://leetcode.com/graphql",
+                json={"query": QUERY, "variables": {"skip": skip, "limit": batch_size}},
+                headers={
+                    "Content-Type": "application/json",
+                    "Referer": "https://leetcode.com",
+                    "User-Agent": "Mozilla/5.0"
+                },
+                timeout=8,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            if "errors" in payload:
+                raise Exception(f"GraphQL error: {payload['errors']}")
+            data = payload["data"]["problemsetQuestionList"]["questions"]
+        except Exception as e:
+            log(f"Indexing worker error at skip={skip}: {e}")
+            break
+
+        if not data:
+            break
+
+        problems.extend(data)
+        skip += batch_size
+
+        # Persist progress and refresh the heartbeat after every batch, so a
+        # concurrently-running query() sees the count grow and knows the
+        # worker is still alive.
+        try:
+            with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
+                json.dump({"skip": skip, "problems": problems}, f)
+            with open(LOCK_FILE, "w", encoding="utf-8") as f:
+                f.write(str(time.time()))
+        except Exception as e:
+            log(f"Indexing worker couldn't persist progress: {e}")
+
+        if len(data) < batch_size:
+            break
+
+    if problems:
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(problems, f)
+        log(f"Indexing worker complete, {len(problems)} problems")
+    else:
+        log("Indexing worker finished with no problems loaded")
+
+    for f in (PROGRESS_FILE, LOCK_FILE):
+        if os.path.exists(f):
+            try:
+                os.remove(f)
+            except Exception:
+                pass
+
+
 if __name__ == "__main__":
-    LeetCodeSearch()
+    if len(sys.argv) > 1 and sys.argv[1] == "--index-worker":
+        run_index_worker()
+    else:
+        LeetCodeSearch()

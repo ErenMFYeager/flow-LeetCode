@@ -1,6 +1,7 @@
 lib/
 problems_cache.json
 fetch_progress.json
+indexing.lock
 __pycache__/
 *.pyc
 error.log
