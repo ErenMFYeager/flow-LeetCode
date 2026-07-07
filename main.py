@@ -14,7 +14,7 @@ from rapidfuzz import fuzz, process
 CACHE_FILE = os.path.join(os.path.dirname(__file__), "problems_cache.json")
 PROGRESS_FILE = os.path.join(os.path.dirname(__file__), "fetch_progress.json")
 LOG_FILE = os.path.join(os.path.dirname(__file__), "error.log")
-CACHE_TTL = 604800  # 7 days
+CACHE_TTL = 604800  
 
 QUERY = """
 query problemsetQuestionList($skip: Int, $limit: Int) {
@@ -110,18 +110,18 @@ class LeetCodeSearch(FlowLauncher):
             if param == "daily":
                 return self.handle_daily()
 
+            if param == "refresh":
+                return self.force_refresh()
+
             problems = self.load_cache_only()
 
             if problems is None:
                 return self.continue_indexing()
 
-            if param == "random":
-                return self.handle_random(problems)
-
             if not param:
                 return [{
                     "Title": "Type a problem name or number...",
-                    "SubTitle": "e.g. lc two sum | lc 1 | lc daily | lc random | lc topic:dp",
+                    "SubTitle": "e.g. lc two sum | lc 1 | lc daily | lc random | lc topic:dp | lc refresh",
                     "IcoPath": "SearchLeetCode.png"
                 }]
 
@@ -130,10 +130,22 @@ class LeetCodeSearch(FlowLauncher):
             tokens, filters = self.extract_filters(tokens)
             clean_param = " ".join(tokens).strip()
 
+            if clean_param == "random" or (clean_param.startswith("random ") or clean_param.endswith(" random")):
+                # allow "random" combined with difficulty/paid/free/topic filters
+                remaining = [t for t in clean_param.split() if t != "random"]
+                if remaining and (remaining[0].startswith("topic:") or remaining[0].startswith("tag:")):
+                    topic_query = remaining[0].split(":", 1)[1].strip()
+                    pool = self.filter_by_topic(topic_query, problems, apply_limit=False)
+                else:
+                    pool = problems
+                pool = self.apply_filters(pool, filters)
+                return self.handle_random(pool)
+
             if clean_param.startswith("topic:") or clean_param.startswith("tag:"):
                 topic_query = clean_param.split(":", 1)[1].strip()
-                matches = self.filter_by_topic(topic_query, problems)
+                matches = self.filter_by_topic(topic_query, problems, apply_limit=False)
                 matches = self.apply_filters(matches, filters)
+                random.shuffle(matches)
                 return self.build_results(matches)
 
             if clean_param.isdigit():
@@ -209,6 +221,19 @@ class LeetCodeSearch(FlowLauncher):
 
         done = (not data) or (len(data) < batch_size)
 
+        if done and not partial:
+            # Nothing loaded at all (e.g. offline / LeetCode unreachable on the very
+            # first request) — don't write an empty cache, or we'd be stuck with
+            # zero problems for a full week until CACHE_TTL expires.
+            if os.path.exists(PROGRESS_FILE):
+                os.remove(PROGRESS_FILE)
+            log("Indexing failed with no problems loaded, will retry on next search")
+            return [{
+                "Title": "Couldn't reach LeetCode to build the index",
+                "SubTitle": "Check your connection and search again to retry",
+                "IcoPath": "SearchLeetCode.png"
+            }]
+
         if done:
             with open(CACHE_FILE, "w", encoding="utf-8") as f:
                 json.dump(partial, f)
@@ -228,6 +253,16 @@ class LeetCodeSearch(FlowLauncher):
                 "SubTitle": "Keep typing/search again to continue (takes a few tries)",
                 "IcoPath": "SearchLeetCode.png"
             }]
+
+    def force_refresh(self):
+        """lc refresh — wipes the cache and kicks off re-indexing immediately."""
+        for f in (CACHE_FILE, PROGRESS_FILE):
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except Exception as e:
+                    log(f"force_refresh couldn't remove {f}: {e}")
+        return self.continue_indexing()
 
     def load_cache_only(self):
         if os.path.exists(CACHE_FILE):
@@ -267,14 +302,32 @@ class LeetCodeSearch(FlowLauncher):
         matched = [problems[idx] for (title, score, idx) in scored if score >= threshold][:limit]
         return matched
 
-    def filter_by_topic(self, topic_query, problems):
+    def filter_by_topic(self, topic_query, problems, apply_limit=True):
         slug = TOPIC_ALIASES.get(topic_query, topic_query.replace(" ", "-"))
+
+        # exact slug match first
         matches = [
             p for p in problems
             if any(tag["slug"] == slug for tag in p.get("topicTags", []))
         ]
-        random.shuffle(matches)
-        return matches[:20]
+
+        # fall back to fuzzy matching against known topic slugs (typo tolerance,
+        # e.g. "topic:dinamic" -> dynamic-programming) if nothing matched exactly
+        if not matches:
+            all_slugs = {tag["slug"] for p in problems for tag in p.get("topicTags", [])}
+            all_slugs.update(TOPIC_ALIASES.values())
+            best = process.extractOne(slug, list(all_slugs), scorer=fuzz.partial_ratio)
+            if best and best[1] >= 80:
+                fuzzy_slug = best[0]
+                matches = [
+                    p for p in problems
+                    if any(tag["slug"] == fuzzy_slug for tag in p.get("topicTags", []))
+                ]
+
+        if apply_limit:
+            random.shuffle(matches)
+            return matches[:20]
+        return matches
 
     def build_results(self, matches):
         results = []
@@ -347,6 +400,13 @@ class LeetCodeSearch(FlowLauncher):
     # ---------- Random ----------
 
     def handle_random(self, problems):
+        if not problems:
+            return [{
+                "Title": "No problems match those filters",
+                "SubTitle": "Try loosening the difficulty/topic/paid filters",
+                "IcoPath": "SearchLeetCode.png"
+            }]
+
         free_problems = [p for p in problems if not p["isPaidOnly"]]
         pool = free_problems if free_problems else problems
         p = random.choice(pool)
