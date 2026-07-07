@@ -14,6 +14,8 @@ Search, filter, and open LeetCode problems instantly — right from [Flow Launch
 - 🎯 **Difficulty & access filters** — combine `easy`, `medium`, `hard`, `free`, `paid` with any search (e.g. `lc topic:array hard`)
 - ⚡ **Local caching** — problem list is cached for 7 days after first index, so searches are instant
 - 🔤 **Number-word normalization** — `lc three sum` correctly finds *3Sum*
+- 🧩 **Typo-tolerant topics** — `lc topic:dinamic` still finds Dynamic Programming
+- 🔄 **Manual refresh** — `lc refresh` rebuilds the local index on demand
 
 ## Usage
 
@@ -27,6 +29,10 @@ Search, filter, and open LeetCode problems instantly — right from [Flow Launch
 | `lc easy` | Random sample of Easy problems |
 | `lc topic:graph hard` | Hard-difficulty Graph problems |
 | `lc free topic:tree` | Free-to-access Tree problems |
+| `lc random hard` | Random Hard problem |
+| `lc random topic:graph` | Random problem from the Graph topic |
+| `lc topic:dinamic` | Typos in topic names are tolerated (fuzzy-matches to `dynamic-programming`) |
+| `lc refresh` | Force a fresh re-index instead of waiting for the 7-day cache to expire |
 
 ## First-time setup
 
